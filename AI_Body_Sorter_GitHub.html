@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Body Sorter</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@latest/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/pose@0.8/dist/teachablemachine-pose.min.js"></script>
+  <style>
+    *{box-sizing:border-box}
+    body{
+      margin:0;font-family:Arial,"Noto Sans Thai",sans-serif;
+      background:linear-gradient(135deg,#fff7fb,#eef9ff);
+      min-height:100vh;color:#222;text-align:center
+    }
+    .wrap{max-width:900px;margin:auto;padding:20px}
+    h1{margin:8px 0;color:#333}
+    .sub{color:#666;margin-bottom:16px}
+    .top{
+      display:flex;justify-content:space-between;gap:10px;
+      background:white;border-radius:18px;padding:14px 18px;
+      box-shadow:0 4px 18px #00000012;margin-bottom:16px
+    }
+    .card{
+      background:white;border-radius:22px;padding:20px;
+      box-shadow:0 6px 24px #00000012
+    }
+    #canvas{width:min(100%,640px);border-radius:18px;background:#eee;display:block;margin:10px auto}
+    .question{font-size:24px;font-weight:700;margin:12px}
+    .target{font-size:30px;font-weight:800}
+    .status{font-size:20px;font-weight:700;min-height:30px;margin:12px}
+    .ok{color:#159447}.bad{color:#d63b3b}.wait{color:#777}
+    button{
+      border:0;border-radius:14px;padding:13px 24px;
+      font-size:18px;font-weight:700;cursor:pointer;background:#222;color:white
+    }
+    button:disabled{opacity:.5;cursor:not-allowed}
+    #startBtn{margin:12px}
+    .progress{height:12px;background:#eee;border-radius:99px;overflow:hidden;margin:15px 0}
+    .bar{height:100%;width:0;background:#65b5ff;transition:.25s}
+    #result{display:none}
+    .small{font-size:14px;color:#777}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🤖 AI Body Sorter</h1>
+  <div class="sub">ทำท่าให้ตรงกับประเภทขยะ • ทำผิดยังอยู่ข้อเดิม</div>
+
+  <div class="top">
+    <div>ข้อ <b id="qNum">1</b> / <b id="qTotal">5</b></div>
+    <div>คะแนน <b id="score">0</b></div><div>⏱️ <b id="timer">1:00</b></div>
+  </div>
+
+  <div class="card">
+    <div class="question">ทิ้งขยะชิ้นนี้ลงถังให้ถูกต้อง</div>
+    <div class="target" id="target">♻️ Recycle</div>
+    <div class="progress"><div class="bar" id="bar"></div></div>
+
+    <canvas id="canvas" width="640" height="480"></canvas>
+
+    <div id="status" class="status wait">กดเริ่มเกมเพื่อเปิดกล้อง</div>
+    <div class="small">♻️ กางแขนสองข้าง • 🍎 ยกมือขวาข้างเดียว • 🗑️ ยกมือซ้ายข้างเดียว • ☢️ นั่งยอง ๆ<br>ทำผิด = อยู่ข้อเดิม • ทำถูก = ไปข้อถัดไป</div>
+    <br>
+    <button id="startBtn">▶️ เริ่มเกม</button>
+  </div>
+
+  <div class="card" id="result">
+    <h2>🎉 จบเกม!</h2>
+    <div style="font-size:30px;font-weight:800">
+      ได้ <span id="finalScore">0</span> / <span id="finalTotal">5</span> คะแนน
+    </div>
+    <br>
+    <button onclick="location.reload()">🔄 เล่นอีกครั้ง</button>
+  </div>
+</div>
+
+<script>
+const MODEL_URL = "https://teachablemachine.withgoogle.com/models/R-27hNbMv/";
+
+let model, webcam, ctx;
+let running = false;
+let currentQuestion = 0;
+let score = 0;
+let lastCorrectTime = 0;\nlet timeLeft = 60;\nlet timerInterval = null;
+
+// แก้ชื่อ Class ตรงนี้ได้ ถ้าใน Teachable Machine ใช้ชื่อไม่ตรงกัน
+const questions = [
+  { answer: "Recycle", emoji: "🥤", label: "ขวดพลาสติก" },
+  { answer: "Organic", emoji: "🍌", label: "เปลือกกล้วย" },
+  { answer: "General", emoji: "🍬", label: "ซองขนม" },
+  { answer: "Hazardous", emoji: "🔋", label: "ถ่านไฟฉาย" },
+  { answer: "Recycle", emoji: "🥫", label: "กระป๋องอะลูมิเนียม" },
+  { answer: "Organic", emoji: "🍎", label: "แกนแอปเปิล" },
+  { answer: "General", emoji: "🧻", label: "กระดาษทิชชูใช้แล้ว" },
+  { answer: "Hazardous", emoji: "💡", label: "หลอดไฟ" },
+  { answer: "Recycle", emoji: "📰", label: "หนังสือพิมพ์" },
+  { answer: "Organic", emoji: "🥬", label: "เศษผัก" },
+  { answer: "General", emoji: "🍱", label: "กล่องโฟมเปื้อนอาหาร" },
+  { answer: "Hazardous", emoji: "🧴", label: "ขวดสารเคมี" },
+  { answer: "Recycle", emoji: "🍾", label: "ขวดแก้ว" },
+  { answer: "Organic", emoji: "🍉", label: "เปลือกแตงโม" },
+  { answer: "General", emoji: "🎈", label: "ลูกโป่ง" },
+  { answer: "Hazardous", emoji: "💊", label: "ยาเหลือใช้" },
+  { answer: "Recycle", emoji: "📦", label: "กล่องกระดาษ" },
+  { answer: "Organic", emoji: "🥚", label: "เปลือกไข่" },
+  { answer: "General", emoji: "🧹", label: "เศษวัสดุทั่วไป" },
+  { answer: "Hazardous", emoji: "🧪", label: "ภาชนะสารเคมีอันตราย" }
+];
+
+const qNum = document.getElementById("qNum");
+const qTotal = document.getElementById("qTotal");
+const scoreEl = document.getElementById("score");
+const target = document.getElementById("target");
+const statusEl = document.getElementById("status");
+const bar = document.getElementById("bar");
+const startBtn = document.getElementById("startBtn");
+const result = document.getElementById("result");
+
+qTotal.textContent = questions.length;
+
+function normalize(s){
+  return String(s).trim().toLowerCase();
+}
+
+function showQuestion(){
+  const q = questions[currentQuestion];
+  qNum.textContent = currentQuestion + 1;
+  target.textContent = `${q.emoji} ${q.label}`;
+  bar.style.width = `${(currentQuestion / questions.length) * 100}%`;
+  statusEl.textContent = "กำลังรอท่าที่ถูกต้อง...";
+  statusEl.className = "status wait";
+}
+
+
+function updateTimer(){
+  const m = Math.floor(timeLeft / 60);
+  const s = String(timeLeft % 60).padStart(2, "0");
+  document.getElementById("timer").textContent = `${m}:${s}`;
+}
+
+function startTimer(){
+  clearInterval(timerInterval);
+  timeLeft = 60;
+  updateTimer();
+
+  timerInterval = setInterval(()=>{
+    if(!running) return;
+
+    timeLeft--;
+    updateTimer();
+
+    if(timeLeft <= 0){
+      timeLeft = 0;
+      updateTimer();
+      endGame("⏰ หมดเวลา!");
+    }
+  }, 1000);
+}
+
+function endGame(message = "🎉 จบเกม!"){
+  if(!running) return;
+  running = false;
+  clearInterval(timerInterval);
+  bar.style.width = `${(currentQuestion / questions.length) * 100}%`;
+  document.getElementById("finalScore").textContent = score;
+  document.getElementById("finalTotal").textContent = questions.length;
+  result.querySelector("h2").textContent = message;
+
+  setTimeout(()=>{
+    result.style.display = "block";
+    document.querySelector(".card").style.display = "none";
+  }, 500);
+}
+
+async function startGame(){
+  startBtn.disabled = true;
+  statusEl.textContent = "กำลังโหลด AI...";
+  statusEl.className = "status wait";
+
+  try{
+    const modelURL = MODEL_URL + "model.json";
+    const metadataURL = MODEL_URL + "metadata.json";
+
+    model = await tmPose.load(modelURL, metadataURL);
+
+    const size = 640;
+    webcam = new tmPose.Webcam(size, size, true);
+    await webcam.setup();
+    await webcam.play();
+
+    canvas = document.getElementById("canvas");
+    ctx = canvas.getContext("2d");
+
+    running = true;
+    startTimer();
+    startBtn.style.display = "none";
+    showQuestion();
+    window.requestAnimationFrame(loop);
+  }catch(err){
+    console.error(err);
+    statusEl.textContent = "เปิดกล้องหรือโหลด AI ไม่สำเร็จ กรุณาอนุญาตกล้องแล้วลองใหม่";
+    statusEl.className = "status bad";
+    startBtn.disabled = false;
+  }
+}
+
+async function loop(){
+  if(!running) return;
+
+  webcam.update();
+  await predict();
+  window.requestAnimationFrame(loop);
+}
+
+async function predict(){
+  const {pose, posenetOutput} = await model.estimatePose(webcam.canvas);
+  const predictions = await model.predict(posenetOutput);
+
+  let best = predictions[0];
+  for(const p of predictions){
+    if(p.probability > best.probability) best = p;
+  }
+
+  // วาดภาพกล้องและ skeleton
+  drawCamera(pose);
+
+  const current = questions[currentQuestion];
+  const correct = normalize(best.className) === normalize(current.answer);
+
+  // ต้องมั่นใจอย่างน้อย 85% และเว้นช่วงเล็กน้อยก่อนเปลี่ยนข้อ
+  if(correct && best.probability >= 0.85 && Date.now() - lastCorrectTime > 1200){
+    lastCorrectTime = Date.now();
+
+    score++;
+    scoreEl.textContent = score;
+
+    statusEl.textContent = `✅ ถูกต้อง! ${Math.round(best.probability * 100)}%`;
+    statusEl.className = "status ok";
+
+    currentQuestion++;
+
+    if(currentQuestion >= questions.length){
+      bar.style.width = "100%";
+      endGame("🎉 ทำครบ 20 ข้อแล้ว!");
+    }else{
+      // เปลี่ยนข้อเมื่อถูกเท่านั้น
+      setTimeout(showQuestion, 700);
+    }
+  }else{
+    // สำคัญ: ถ้าผิด ไม่เพิ่ม currentQuestion และไม่เปลี่ยนข้อ
+    if(best.probability >= 0.55){
+      statusEl.textContent =
+        `❌ ยังไม่ถูก — AI เห็นว่า ${best.className} (${Math.round(best.probability*100)}%)`;
+      statusEl.className = "status bad";
+    }else{
+      statusEl.textContent = "👀 AI กำลังตรวจท่าทาง...";
+      statusEl.className = "status wait";
+    }
+  }
+}
+
+function drawCamera(pose){
+  ctx.drawImage(webcam.canvas,0,0,640,480);
+  if(pose){
+    const minPartConfidence = 0.5;
+    tmPose.drawKeypoints(pose.keypoints, minPartConfidence, ctx);
+    tmPose.drawSkeleton(pose.keypoints, minPartConfidence, ctx);
+  }
+}
+
+startBtn.addEventListener("click", startGame);
+</script>
+</body>
+</html>
